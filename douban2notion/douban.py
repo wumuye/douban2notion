@@ -9,6 +9,7 @@ from retrying import retry
 import requests
 from douban2notion.notion_helper import NotionHelper
 from douban2notion import utils
+import tempfile
 
 DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
@@ -62,6 +63,53 @@ def _proxy_image_url(original_url: str) -> str:
         return ""
     # 使用 wsrv.nl 图片代理服务（原 images.weserv.nl）
     return f"https://wsrv.nl/?url={original_url}"
+
+
+def get_douban_image_url(photo_page_url: str) -> str:
+    """
+    从豆瓣图片页面提取实际图片URL
+    示例：
+      in:  https://movie.douban.com/photos/photo/2915119069/#title-anchor
+      out: https://img1.doubanio.com/view/photo/s_ratio_poster/public/p2915119069.jpg
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Referer": "https://movie.douban.com/",
+    }
+    try:
+        response = requests.get(photo_page_url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        # 查找图片元素，豆瓣图片页面的图片通常在 <img> 标签中，class 可能为 "photo-img" 或类似
+        img_tag = soup.find("img", {"class": "photo-img"})
+        if img_tag and img_tag.get("src"):
+            return img_tag["src"]
+        # 如果找不到，尝试其他可能的标签
+        img_tag = soup.find("img")
+        if img_tag and img_tag.get("src"):
+            return img_tag["src"]
+    except Exception as e:
+        print(f"提取图片URL失败: {e}")
+    return ""
+
+
+def download_image_to_temp(url: str) -> str:
+    """
+    下载图片到临时文件，返回临时文件路径
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        # 创建临时文件（保留文件名后缀，比如 .jpg）
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+            temp_file.write(response.content)
+            return temp_file.name
+    except Exception as e:
+        print(f"下载图片失败: {e}")
+        return ""
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -170,13 +218,60 @@ def insert_movie(douban_name, notion_helper):
 
         else:
             print(f"插入{movie.get('电影名')}")
-            cover = subject.get("pic").get("normal")
-            # === 修正：去掉 .webp 强制转换，使用原始格式 ===
-            # if not cover.endswith('.webp'):
-            #     cover = cover.rsplit('.', 1)[0] + '.webp'
-            # === 关键修改：使用图片代理，避免豆瓣防盗链 403 ===
+            # === 关键修改：从豆瓣图片页面提取实际图片URL ===
+            cover_url = subject.get("pic").get("normal")
+            if cover_url:
+                cover = get_douban_image_url(cover_url)
+            else:
+                cover = ""
+            # 使用图片代理
             cover_proxied = _proxy_image_url(cover)
-            movie["封面"] = cover_proxied  # 写入 Notion 的封面字段
+            # 下载图片到临时文件
+            temp_file_path = download_image_to_temp(cover_proxied)
+            if temp_file_path:
+                # 上传到 Notion
+                file_id = notion_helper.upload_file(temp_file_path)
+                # 删除临时文件
+                os.remove(temp_file_path)
+                if file_id:
+                    # 设置封面为文件（Notion 要求的格式）
+                    properties["封面"] = {
+                        "files": [
+                            {
+                                "type": "file",
+                                "name": "cover.jpg",
+                                "file": {
+                                    "id": file_id
+                                }
+                            }
+                        ]
+                    }
+                else:
+                    # 上传失败，使用外部链接作为备用
+                    properties["封面"] = {
+                        "files": [
+                            {
+                                "type": "external",
+                                "name": "cover.jpg",
+                                "external": {
+                                    "url": cover_proxied
+                                }
+                            }
+                        ]
+                    }
+            else:
+                # 下载失败，使用外部链接作为备用
+                properties["封面"] = {
+                    "files": [
+                        {
+                            "type": "external",
+                            "name": "cover.jpg",
+                            "external": {
+                                "url": cover_proxied
+                            }
+                        }
+                    ]
+                }
             movie["类型"] = subject.get("type")
             if subject.get("genres"):
                 movie["分类"] = [
@@ -267,13 +362,60 @@ def insert_book(douban_name, notion_helper):
         book["日期"] = create_time.int_timestamp
         book["豆瓣链接"] = subject.get("url")
         book["状态"] = book_status.get(result.get("status"))
-        cover = subject.get("pic").get("large")
-        # === 修正：去掉 .webp 强制转换，使用原始格式 ===
-        # if not cover.endswith('.webp'):
-        #     cover = cover.rsplit('.', 1)[0] + '.webp'
-        # === 关键修改：使用图片代理，避免豆瓣防盗链 403 ===
+        # === 关键修改：从豆瓣图片页面提取实际图片URL ===
+        cover_url = subject.get("pic").get("large")
+        if cover_url:
+            cover = get_douban_image_url(cover_url)
+        else:
+            cover = ""
+        # 使用图片代理
         cover_proxied = _proxy_image_url(cover)
-        book["封面"] = cover_proxied  # 写入 Notion 的封面字段
+        # 下载图片到临时文件
+        temp_file_path = download_image_to_temp(cover_proxied)
+        if temp_file_path:
+            # 上传到 Notion
+            file_id = notion_helper.upload_file(temp_file_path)
+            # 删除临时文件
+            os.remove(temp_file_path)
+            if file_id:
+                # 设置封面为文件（Notion 要求的格式）
+                properties["封面"] = {
+                    "files": [
+                        {
+                            "type": "file",
+                            "name": "cover.jpg",
+                            "file": {
+                                "id": file_id
+                            }
+                        }
+                    ]
+                }
+            else:
+                # 上传失败，使用外部链接作为备用
+                properties["封面"] = {
+                    "files": [
+                        {
+                            "type": "external",
+                            "name": "cover.jpg",
+                            "external": {
+                                "url": cover_proxied
+                            }
+                        }
+                    ]
+                }
+        else:
+            # 下载失败，使用外部链接作为备用
+            properties["封面"] = {
+                "files": [
+                    {
+                        "type": "external",
+                        "name": "cover.jpg",
+                        "external": {
+                            "url": cover_proxied
+                        }
+                    }
+                ]
+            }
         if result.get("rating"):
             book["评分"] = rating.get(result.get("rating").get("value"))
         if result.get("comment"):
