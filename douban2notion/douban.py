@@ -171,8 +171,9 @@ def insert_movie(douban_name, notion_helper):
         else:
             print(f"插入{movie.get('电影名')}")
             cover = subject.get("pic").get("normal")
-            if not cover.endswith('.webp'):
-                cover = cover.rsplit('.', 1)[0] + '.webp'
+            # === 修正：去掉 .webp 强制转换，使用原始格式 ===
+            # if not cover.endswith('.webp'):
+            #     cover = cover.rsplit('.', 1)[0] + '.webp'
             # === 关键修改：使用图片代理，避免豆瓣防盗链 403 ===
             cover_proxied = _proxy_image_url(cover)
             movie["封面"] = cover_proxied  # 写入 Notion 的封面字段
@@ -267,8 +268,9 @@ def insert_book(douban_name, notion_helper):
         book["豆瓣链接"] = subject.get("url")
         book["状态"] = book_status.get(result.get("status"))
         cover = subject.get("pic").get("large")
-        if not cover.endswith('.webp'):
-            cover = cover.rsplit('.', 1)[0] + '.webp'
+        # === 修正：去掉 .webp 强制转换，使用原始格式 ===
+        # if not cover.endswith('.webp'):
+        #     cover = cover.rsplit('.', 1)[0] + '.webp'
         # === 关键修改：使用图片代理，避免豆瓣防盗链 403 ===
         cover_proxied = _proxy_image_url(cover)
         book["封面"] = cover_proxied  # 写入 Notion 的封面字段
