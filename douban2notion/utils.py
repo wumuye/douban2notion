@@ -284,6 +284,8 @@ def get_property_value(property):
             return content[0].get("external").get("url")
         elif len(content) > 0 and content[0].get("type") == "file":
             return (content[0].get("file") or {}).get("url")
+        elif len(content) > 0 and content[0].get("type") == "file_upload":
+            return (content[0].get("file_upload") or {}).get("id")
         else:
             return None
     elif type == "date":

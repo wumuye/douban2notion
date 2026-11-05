@@ -125,7 +125,11 @@ def upload_cover(notion_helper, pic_url: str):
             pass
     if not file_id:
         return None, None
-    return {"files": [{"type": "file", "name": "cover.jpg", "file": {"id": file_id}}]}, file_id
+    return {
+        "files": [
+            {"type": "file_upload", "file_upload": {"id": file_id}, "name": "cover.jpg"}
+        ]
+    }, file_id
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -283,7 +287,7 @@ def insert_movie(douban_name, notion_helper):
             )
             if cover_prop:
                 properties["封面"] = cover_prop
-            icon = {"type": "file", "file": {"id": cover_file_id}} if cover_file_id else None
+            icon = {"type": "file_upload", "file_upload": {"id": cover_file_id}} if cover_file_id else None
             notion_helper.create_page(parent=parent, properties=properties, icon=icon)
 
 
@@ -395,7 +399,7 @@ def insert_book(douban_name, notion_helper):
             )
             if cover_prop:
                 properties["封面"] = cover_prop
-            icon = {"type": "file", "file": {"id": cover_file_id}} if cover_file_id else None
+            icon = {"type": "file_upload", "file_upload": {"id": cover_file_id}} if cover_file_id else None
             notion_helper.create_page(parent=parent, properties=properties, icon=icon)
 
 
