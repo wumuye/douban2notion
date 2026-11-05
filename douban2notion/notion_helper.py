@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 
 from notion_client import Client
 from retrying import retry
@@ -87,6 +88,30 @@ class NotionHelper:
             self.write_database_id(self.day_database_id)
         if is_movie:
             self.update_movie_database()
+
+    def upload_file(self, file_path, filename=None, retries=3):
+        """上传本地图片到 Notion，返回 file_upload_id。
+
+        豆瓣图片有 Referer 校验、外部链接 Notion 抓不到，因此封面/图标改用文件上传。
+        批量补封面时容易触发 429 限流，这里对限流做退避重试。
+        """
+        for attempt in range(retries):
+            try:
+                upload = self.client.file_uploads.create(mode="single_part")
+                upload_id = upload.get("id")
+                with open(file_path, "rb") as f:
+                    self.client.file_uploads.send(
+                        file_upload_id=upload_id,
+                        file=(filename or os.path.basename(file_path), f),
+                    )
+                return upload_id
+            except Exception as e:
+                message = str(e)
+                if attempt < retries - 1 and ("429" in message or "rate" in message.lower()):
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                print(f"上传图片到 Notion 失败: {e}")
+                return None
 
     def write_database_id(self, database_id):
         env_file = os.getenv('GITHUB_ENV')

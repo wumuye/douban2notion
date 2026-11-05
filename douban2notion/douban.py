@@ -52,64 +52,80 @@ headers = {
 }
 
 
+IMAGE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36",
+    "Referer": "https://movie.douban.com/",
+    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+}
+
+
 def _proxy_image_url(original_url: str) -> str:
-    """
-    把豆瓣图片外链转换为通过 wsrv.nl 图片代理访问的 URL
-    示例：
-      in:  https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2544866651.jpg
-      out: https://wsrv.nl/?url=https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2544866651.jpg
-    """
+    """兼容保留：wsrv.nl 图片代理（豆瓣已加 Referer 校验，仅作兜底，不再作为主链路）"""
     if not original_url:
         return ""
-    # 使用 wsrv.nl 图片代理服务（原 images.weserv.nl）
     return f"https://wsrv.nl/?url={original_url}"
 
 
-def get_douban_image_url(photo_page_url: str) -> str:
-    """
-    从豆瓣图片页面提取实际图片URL
-    示例：
-      in:  https://movie.douban.com/photos/photo/2915119069/#title-anchor
-      out: https://img1.doubanio.com/view/photo/s_ratio_poster/public/p2915119069.jpg
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Referer": "https://movie.douban.com/",
-    }
-    try:
-        response = requests.get(photo_page_url, headers=headers, timeout=10)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, "html.parser")
-        # 查找图片元素，豆瓣图片页面的图片通常在 <img> 标签中，class 可能为 "photo-img" 或类似
-        img_tag = soup.find("img", {"class": "photo-img"})
-        if img_tag and img_tag.get("src"):
-            return img_tag["src"]
-        # 如果找不到，尝试其他可能的标签
-        img_tag = soup.find("img")
-        if img_tag and img_tag.get("src"):
-            return img_tag["src"]
-    except Exception as e:
-        print(f"提取图片URL失败: {e}")
-    return ""
-
-
 def download_image_to_temp(url: str) -> str:
+    """下载豆瓣封面到临时文件。
+
+    豆瓣自 2026 年起对图片做 Referer 校验：不带 Referer 直接访问返回 418，
+    Notion 服务端抓外链同理失败，因此必须由本进程下载后再上传。
     """
-    下载图片到临时文件，返回临时文件路径
-    """
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-    }
+    if not url:
+        return ""
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=IMAGE_HEADERS, timeout=20)
         response.raise_for_status()
-        # 创建临时文件（保留文件名后缀，比如 .jpg）
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+        content_type = response.headers.get("Content-Type", "")
+        if not content_type.startswith("image/"):
+            print(f"封面下载失败：非图片响应 ({response.status_code} {content_type})")
+            return ""
+        suffix = ".jpg"
+        if "png" in content_type:
+            suffix = ".png"
+        elif "webp" in content_type:
+            suffix = ".webp"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as temp_file:
             temp_file.write(response.content)
             return temp_file.name
     except Exception as e:
         print(f"下载图片失败: {e}")
         return ""
+
+
+def cover_needs_fix(cover_value) -> bool:
+    """判断 Notion 现有封面是否需要重抓。
+
+    豆瓣已对图片做 Referer 校验：旧的外链封面（doubanio/douban 域名或 wsrv 代理）
+    在 Notion 里必然显示为空白，因此这类值也要视为「需要修复」。
+    """
+    if not cover_value:
+        return True
+    value = str(cover_value)
+    return (
+        "doubanio.com" in value
+        or "douban.com" in value
+        or "wsrv.nl" in value
+        or "weserv.nl" in value
+    )
+
+
+def upload_cover(notion_helper, pic_url: str):
+    """下载封面并上传到 Notion，返回 (files 属性, file_upload_id)；任一步失败返回 (None, None)"""
+    temp_file_path = download_image_to_temp(pic_url)
+    if not temp_file_path:
+        return None, None
+    try:
+        file_id = notion_helper.upload_file(temp_file_path)
+    finally:
+        try:
+            os.remove(temp_file_path)
+        except OSError:
+            pass
+    if not file_id:
+        return None, None
+    return {"files": [{"type": "file", "name": "cover.jpg", "file": {"id": file_id}}]}, file_id
 
 
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
@@ -158,6 +174,7 @@ def insert_movie(douban_name, notion_helper):
             "评分": movie.get("评分"),
             "演员": movie.get("演员"),
             "IMDB": movie.get("IMDB"),
+            "封面": movie.get("封面"),
             "page_id": i.get("id"),
         }
     results = []
@@ -190,6 +207,7 @@ def insert_movie(douban_name, notion_helper):
                 or notion_movive.get("评分") != movie.get("评分")
                 or not notion_movive.get("演员")
                 or not notion_movive.get("IMDB")
+                or cover_needs_fix(notion_movive.get("封面"))
             ):
                 if not notion_movive.get("演员") and subject.get("actors"):
                     l = []
@@ -209,6 +227,12 @@ def insert_movie(douban_name, notion_helper):
                 if not notion_movive.get("IMDB"):
                     movie["IMDB"] = get_imdb(movie.get("豆瓣链接"))
                 properties = utils.get_properties(movie, movie_properties_type_dict)
+                if cover_needs_fix(notion_movive.get("封面")):
+                    cover_prop, _ = upload_cover(
+                        notion_helper, (subject.get("pic") or {}).get("normal")
+                    )
+                    if cover_prop:
+                        properties["封面"] = cover_prop
                 print(movie.get("电影名"))
                 notion_helper.get_date_relation(properties, create_time)
                 notion_helper.update_page(
@@ -218,60 +242,6 @@ def insert_movie(douban_name, notion_helper):
 
         else:
             print(f"插入{movie.get('电影名')}")
-            # === 关键修改：从豆瓣图片页面提取实际图片URL ===
-            cover_url = subject.get("pic").get("normal")
-            if cover_url:
-                cover = get_douban_image_url(cover_url)
-            else:
-                cover = ""
-            # 使用图片代理
-            cover_proxied = _proxy_image_url(cover)
-            # 下载图片到临时文件
-            temp_file_path = download_image_to_temp(cover_proxied)
-            if temp_file_path:
-                # 上传到 Notion
-                file_id = notion_helper.upload_file(temp_file_path)
-                # 删除临时文件
-                os.remove(temp_file_path)
-                if file_id:
-                    # 设置封面为文件（Notion 要求的格式）
-                    properties["封面"] = {
-                        "files": [
-                            {
-                                "type": "file",
-                                "name": "cover.jpg",
-                                "file": {
-                                    "id": file_id
-                                }
-                            }
-                        ]
-                    }
-                else:
-                    # 上传失败，使用外部链接作为备用
-                    properties["封面"] = {
-                        "files": [
-                            {
-                                "type": "external",
-                                "name": "cover.jpg",
-                                "external": {
-                                    "url": cover_proxied
-                                }
-                            }
-                        ]
-                    }
-            else:
-                # 下载失败，使用外部链接作为备用
-                properties["封面"] = {
-                    "files": [
-                        {
-                            "type": "external",
-                            "name": "cover.jpg",
-                            "external": {
-                                "url": cover_proxied
-                            }
-                        }
-                    ]
-                }
             movie["类型"] = subject.get("type")
             if subject.get("genres"):
                 movie["分类"] = [
@@ -308,10 +278,13 @@ def insert_movie(douban_name, notion_helper):
                 "database_id": notion_helper.movie_database_id,
                 "type": "database_id",
             }
-            # icon 也用代理后的封面 URL，保证图标也能正常显示
-            notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(cover_proxied)
+            cover_prop, cover_file_id = upload_cover(
+                notion_helper, (subject.get("pic") or {}).get("normal")
             )
+            if cover_prop:
+                properties["封面"] = cover_prop
+            icon = {"type": "file", "file": {"id": cover_file_id}} if cover_file_id else None
+            notion_helper.create_page(parent=parent, properties=properties, icon=icon)
 
 
 def get_imdb(link):
@@ -362,60 +335,6 @@ def insert_book(douban_name, notion_helper):
         book["日期"] = create_time.int_timestamp
         book["豆瓣链接"] = subject.get("url")
         book["状态"] = book_status.get(result.get("status"))
-        # === 关键修改：从豆瓣图片页面提取实际图片URL ===
-        cover_url = subject.get("pic").get("large")
-        if cover_url:
-            cover = get_douban_image_url(cover_url)
-        else:
-            cover = ""
-        # 使用图片代理
-        cover_proxied = _proxy_image_url(cover)
-        # 下载图片到临时文件
-        temp_file_path = download_image_to_temp(cover_proxied)
-        if temp_file_path:
-            # 上传到 Notion
-            file_id = notion_helper.upload_file(temp_file_path)
-            # 删除临时文件
-            os.remove(temp_file_path)
-            if file_id:
-                # 设置封面为文件（Notion 要求的格式）
-                properties["封面"] = {
-                    "files": [
-                        {
-                            "type": "file",
-                            "name": "cover.jpg",
-                            "file": {
-                                "id": file_id
-                            }
-                        }
-                    ]
-                }
-            else:
-                # 上传失败，使用外部链接作为备用
-                properties["封面"] = {
-                    "files": [
-                        {
-                            "type": "external",
-                            "name": "cover.jpg",
-                            "external": {
-                                "url": cover_proxied
-                            }
-                        }
-                    ]
-                }
-        else:
-            # 下载失败，使用外部链接作为备用
-            properties["封面"] = {
-                "files": [
-                    {
-                        "type": "external",
-                        "name": "cover.jpg",
-                        "external": {
-                            "url": cover_proxied
-                        }
-                    }
-                ]
-            }
         if result.get("rating"):
             book["评分"] = rating.get(result.get("rating").get("value"))
         if result.get("comment"):
@@ -423,8 +342,7 @@ def insert_book(douban_name, notion_helper):
         if notion_book_dict.get(book.get("豆瓣链接")):
             notion_movive = notion_book_dict.get(book.get("豆瓣链接"))
             if (
-                notion_movive.get("封面") is None
-                or notion_movive.get("封面") != book.get("封面")
+                cover_needs_fix(notion_movive.get("封面"))
                 or notion_movive.get("日期") != book.get("日期")
                 or notion_movive.get("短评") != book.get("短评")
                 or notion_movive.get("状态") != book.get("状态")
@@ -432,6 +350,12 @@ def insert_book(douban_name, notion_helper):
             ):
                 print(f"更新{book.get('书名')}")
                 properties = utils.get_properties(book, book_properties_type_dict)
+                if cover_needs_fix(notion_movive.get("封面")):
+                    cover_prop, _ = upload_cover(
+                        notion_helper, (subject.get("pic") or {}).get("large")
+                    )
+                    if cover_prop:
+                        properties["封面"] = cover_prop
                 notion_helper.get_date_relation(properties, create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
@@ -466,10 +390,13 @@ def insert_book(douban_name, notion_helper):
                 "database_id": notion_helper.book_database_id,
                 "type": "database_id",
             }
-            # icon 也用代理后的封面 URL
-            notion_helper.create_page(
-                parent=parent, properties=properties, icon=get_icon(cover_proxied)
+            cover_prop, cover_file_id = upload_cover(
+                notion_helper, (subject.get("pic") or {}).get("large")
             )
+            if cover_prop:
+                properties["封面"] = cover_prop
+            icon = {"type": "file", "file": {"id": cover_file_id}} if cover_file_id else None
+            notion_helper.create_page(parent=parent, properties=properties, icon=icon)
 
 
 def main():
