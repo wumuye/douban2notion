@@ -1,4 +1,4 @@
-Metadata-Version: 2.1
+Metadata-Version: 2.4
 Name: douban2notion
 Version: 0.0.14
 Summary: 自动将豆瓣电影和豆瓣读书同步到Notion
@@ -18,6 +18,15 @@ Requires-Dist: github-heatmap
 Requires-Dist: python-dotenv
 Requires-Dist: beautifulsoup4
 Requires-Dist: lxml
+Dynamic: author
+Dynamic: author-email
+Dynamic: classifier
+Dynamic: description
+Dynamic: description-content-type
+Dynamic: home-page
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary
 
 # 将豆瓣电影和读书同步到Notion
 
