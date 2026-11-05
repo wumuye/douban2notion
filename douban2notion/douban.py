@@ -204,16 +204,23 @@ def insert_movie(douban_name, notion_helper):
             movie["短评"] = result.get("comment")
         if notion_movie_dict.get(movie.get("豆瓣链接")):
             notion_movive = notion_movie_dict.get(movie.get("豆瓣链接"))
+            # 只在「豆瓣确实有数据、而 Notion 缺」时才补，避免每次运行做无效重写
+            # （豆瓣对「想看」条目通常不返回演员，对剧集通常没有 IMDb）
+            missing_actors = bool(subject.get("actors")) and not notion_movive.get("演员")
+            missing_imdb = (
+                subject.get("type") in (None, "movie", "电影")
+                and not notion_movive.get("IMDB")
+            )
             if (
                 notion_movive.get("日期") != movie.get("日期")
                 or notion_movive.get("短评") != movie.get("短评")
                 or notion_movive.get("状态") != movie.get("状态")
                 or notion_movive.get("评分") != movie.get("评分")
-                or not notion_movive.get("演员")
-                or not notion_movive.get("IMDB")
+                or missing_actors
+                or missing_imdb
                 or cover_needs_fix(notion_movive.get("封面"))
             ):
-                if not notion_movive.get("演员") and subject.get("actors"):
+                if missing_actors:
                     l = []
                     actors = subject.get("actors")[0:5]
                     for actor in actors:
@@ -228,7 +235,7 @@ def insert_movie(douban_name, notion_helper):
                         )
                         for x in actors
                     ]
-                if not notion_movive.get("IMDB"):
+                if missing_imdb:
                     movie["IMDB"] = get_imdb(movie.get("豆瓣链接"))
                 properties = utils.get_properties(movie, movie_properties_type_dict)
                 if cover_needs_fix(notion_movive.get("封面")):
