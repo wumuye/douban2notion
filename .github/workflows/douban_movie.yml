@@ -2,6 +2,11 @@ name: douban movie sync
 
 on:
   workflow_dispatch:
+    inputs:
+      backfill_icon:
+        description: "全量补齐页面图标（一次性，跑完可留空）"
+        type: boolean
+        default: false
   schedule:
     - cron: "0 16 * * *"
 concurrency:
@@ -20,6 +25,7 @@ jobs:
         YEAR: ${{ vars.YEAR }}
         REF: ${{ github.ref }}
         REPOSITORY: ${{ github.repository }}
+        BACKFILL_ICON: ${{ inputs.backfill_icon }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
