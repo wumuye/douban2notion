@@ -10,6 +10,7 @@ import requests
 from douban2notion.notion_helper import NotionHelper
 from douban2notion import utils
 import tempfile
+import time
 
 DOUBAN_API_HOST = os.getenv("DOUBAN_API_HOST", "frodo.douban.com")
 DOUBAN_API_KEY = os.getenv("DOUBAN_API_KEY", "0ac44ae016490db2204ce0a042db2916")
@@ -43,6 +44,14 @@ book_status = {
     "done": "读过",
 }
 AUTH_TOKEN = os.getenv("AUTH_TOKEN")
+# 一次性全量补齐页面图标（workflow_dispatch 的 backfill_icon 开关）；
+# 平时为空，走 page_icon_needs_fix 的增量判断
+FULL_ICON_BACKFILL = os.getenv("BACKFILL_ICON", "").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
 
 headers = {
     "host": DOUBAN_API_HOST,
@@ -132,6 +141,61 @@ def upload_cover(notion_helper, pic_url: str):
     }, file_id
 
 
+def page_icon_needs_fix(icon) -> bool:
+    """页面图标是否需要补。
+
+    老页面把豆瓣外链当图标，豆瓣加了 Referer 校验后 Notion 抓不到，
+    会在页面顶部渲染成一个空白方块，这类值一律视为需要重刷。
+    自己设过 emoji 的页面不动。
+    """
+    if not icon:
+        return True
+    icon_type = icon.get("type")
+    if icon_type in ("emoji", "custom_emoji"):
+        return False
+    url = ""
+    if icon_type == "external":
+        url = (icon.get("external") or {}).get("url") or ""
+    elif icon_type == "file":
+        url = (icon.get("file") or {}).get("url") or ""
+    return not url or "douban" in url or "wsrv" in url
+
+
+def ensure_poster_files(notion_helper, pic_url, need_cover, need_icon):
+    """按需下载一次海报，分别上传给「封面」属性和「页面图标」。
+
+    Notion 里一个 file_upload 只能挂到一处：属性与图标必须各传一份，
+    否则后挂的那一处会渲染成空白（历史页面顶部的空图标就是这么来的）。
+    返回 (封面属性, 图标)，未需要或失败时为 None。
+    """
+    if not (need_cover or need_icon):
+        return None, None
+    temp_file_path = download_image_to_temp(pic_url)
+    if not temp_file_path:
+        return None, None
+    try:
+        cover_id = notion_helper.upload_file(temp_file_path) if need_cover else None
+        icon_id = notion_helper.upload_file(temp_file_path) if need_icon else None
+    finally:
+        try:
+            os.remove(temp_file_path)
+        except OSError:
+            pass
+    cover_prop = None
+    if cover_id:
+        cover_prop = {
+            "files": [
+                {
+                    "type": "file_upload",
+                    "file_upload": {"id": cover_id},
+                    "name": "cover.jpg",
+                }
+            ]
+        }
+    icon = {"type": "file_upload", "file_upload": {"id": icon_id}} if icon_id else None
+    return cover_prop, icon
+
+
 @retry(stop_max_attempt_number=3, wait_fixed=5000)
 def fetch_subjects(user, type_, status):
     offset = 0
@@ -179,6 +243,7 @@ def insert_movie(douban_name, notion_helper):
             "演员": movie.get("演员"),
             "IMDB": movie.get("IMDB"),
             "封面": movie.get("封面"),
+            "icon": i.get("icon"),
             "page_id": i.get("id"),
         }
     results = []
@@ -211,6 +276,10 @@ def insert_movie(douban_name, notion_helper):
                 subject.get("type") in (None, "movie", "电影")
                 and not notion_movive.get("IMDB")
             )
+            need_cover = cover_needs_fix(notion_movive.get("封面"))
+            need_icon = FULL_ICON_BACKFILL or page_icon_needs_fix(
+                notion_movive.get("icon")
+            )
             if (
                 notion_movive.get("日期") != movie.get("日期")
                 or notion_movive.get("短评") != movie.get("短评")
@@ -218,7 +287,8 @@ def insert_movie(douban_name, notion_helper):
                 or notion_movive.get("评分") != movie.get("评分")
                 or missing_actors
                 or missing_imdb
-                or cover_needs_fix(notion_movive.get("封面"))
+                or need_cover
+                or need_icon
             ):
                 if missing_actors:
                     l = []
@@ -238,18 +308,24 @@ def insert_movie(douban_name, notion_helper):
                 if missing_imdb:
                     movie["IMDB"] = get_imdb(movie.get("豆瓣链接"))
                 properties = utils.get_properties(movie, movie_properties_type_dict)
-                if cover_needs_fix(notion_movive.get("封面")):
-                    cover_prop, _ = upload_cover(
-                        notion_helper, (subject.get("pic") or {}).get("normal")
-                    )
-                    if cover_prop:
-                        properties["封面"] = cover_prop
+                cover_prop, icon = ensure_poster_files(
+                    notion_helper,
+                    (subject.get("pic") or {}).get("normal"),
+                    need_cover=need_cover,
+                    need_icon=need_icon,
+                )
+                if cover_prop:
+                    properties["封面"] = cover_prop
                 print(movie.get("电影名"))
                 notion_helper.get_date_relation(properties, create_time)
                 notion_helper.update_page(
                     page_id=notion_movive.get("page_id"),
                     properties=properties,
+                    icon=icon,
                 )
+                if FULL_ICON_BACKFILL:
+                    # 一次性全量补图标时限速，避免触发 Notion 429
+                    time.sleep(0.35)
 
         else:
             print(f"插入{movie.get('电影名')}")
@@ -289,12 +365,14 @@ def insert_movie(douban_name, notion_helper):
                 "database_id": notion_helper.movie_database_id,
                 "type": "database_id",
             }
-            cover_prop, cover_file_id = upload_cover(
-                notion_helper, (subject.get("pic") or {}).get("normal")
+            cover_prop, icon = ensure_poster_files(
+                notion_helper,
+                (subject.get("pic") or {}).get("normal"),
+                need_cover=True,
+                need_icon=True,
             )
             if cover_prop:
                 properties["封面"] = cover_prop
-            icon = {"type": "file_upload", "file_upload": {"id": cover_file_id}} if cover_file_id else None
             notion_helper.create_page(parent=parent, properties=properties, icon=icon)
 
 
